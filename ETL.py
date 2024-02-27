@@ -5,7 +5,6 @@ import configparser
 import psycopg2
 import datetime
 from sqlalchemy import create_engine
-from sqlalchemy.engine import URL
 
 
 config = configparser.ConfigParser()
@@ -61,11 +60,25 @@ for city in cities:
 
 # Crear DataFrame a partir de la lista de datos
 df_climatico_total = pd.DataFrame(datos_climaticos_lista)
+df_climatico_total['actual_date'] = pd.Timestamp.now()
 
 print(df_climatico_total)
 
 # Consulta SQL para crear una tabla si no existe
 create_table_query = """
+CREATE TABLE IF NOT EXISTS stg_weather_data (
+    city VARCHAR(50),
+    date DATE,
+    temp_max DECIMAL(5,2),
+    temp_min DECIMAL(5,2),
+    feels_like_max DECIMAL(5,2),
+    feels_like_min DECIMAL(5,2),
+    humidity DECIMAL(5,2),
+    precip_prob DECIMAL(5,2),
+    actual_date DATE,
+    CONSTRAINT weather_pk PRIMARY KEY (city, date)
+);
+
 CREATE TABLE IF NOT EXISTS weather_data (
     city VARCHAR(50),
     date DATE,
@@ -74,7 +87,9 @@ CREATE TABLE IF NOT EXISTS weather_data (
     feels_like_max DECIMAL(5,2),
     feels_like_min DECIMAL(5,2),
     humidity DECIMAL(5,2),
-    precip_prob DECIMAL(5,2)
+    precip_prob DECIMAL(5,2),
+    actual_date DATE,
+    CONSTRAINT weather_pk PRIMARY KEY (city, date)
 );
 """
 
@@ -105,7 +120,29 @@ connection_string = f"postgresql://{config['redshift']['user']}:{config['redshif
 engine = create_engine(connection_string)
 
 with engine.connect() as connection:
-    df_climatico_total.to_sql('weather_data', connection,schema = "nicolas_ortizc_coderhouse", if_exists='append', index=False)
-    connection.execute("commit")
-
-
+    conn.execute('TRUNCATE TABLE stg_weather_data')
+    df_climatico_total.to_sql(
+        'stg_weather_data'
+        ,connection
+        ,schema = "nicolas_ortizc_coderhouse"
+        ,if_exists='append'
+        ,index=False #evita agregar el indice por defecto del df de pandas
+        ,method = 'multi'#insertamos filas en lote
+        )
+    conn.execute("""
+    MERGE into weather_data
+    using stg_weather_data AS stg
+    ON weather_data.city = stg.city
+    AND weather_data.date = stg.date
+    WHEN MATCHED THEN 
+    UPDATE 
+    SET weather_data.temp_max = stg.temp_max
+    SET weather_data.temp_min = stg.temp_min
+    SET weather_data.feels_like_max = stg.feels_like_max
+    SET weather_data.feels_like_min = stg.feels_like_min               
+    SET weather_data.humidity = stg.humidity       
+    SET weather_data.precip_prob = stg.precip_prob    
+    SET weather_data.actual_date = stg.actual_date            
+    when NOT MATCHED THEN
+    INSERT(city, date, temp_max, temp_min, feels_like_max, feels_like_min, humidity, precip_prob, actual_date)        
+    """)
